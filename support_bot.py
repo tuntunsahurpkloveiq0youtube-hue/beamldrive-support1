@@ -335,6 +335,16 @@ def api_tilda(query, raw, ctype, ip):
     return 200, {"ok": True}
 
 
+def api_news_public():
+    rows = rest("GET", "news_posts", "order=id.desc&limit=20&select=id,text,created")
+    out = []
+    for r in rows:
+        m = re.search(r"https?://\S+", r["text"])
+        out.append({"id": r["id"], "text": r["text"], "created": r["created"],
+                    "link": m.group(0) if m else ""})
+    return {"news": out}
+
+
 def api_list(user, d):
     rows = rest("GET", "tickets", f"user_id=eq.{int(user['id'])}&order=updated.desc&limit=100"
                                   f"&select=id,subject,status,updated")
@@ -499,6 +509,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/ping":
             return self._reply(200, {"ok": True})
+        if self.path.split("?")[0] == "/api/news":
+            try:
+                return self._reply(200, api_news_public())
+            except Exception as e:
+                print("news error:", e, flush=True)
+                return self._reply(500, {"error": "Ошибка сервера"})
         self._reply(404, {"error": "not found"})
 
     def do_POST(self):
@@ -561,7 +577,9 @@ HELP = ("Команды:\n"
         "/perm имя +server — добавить право (или -server — убрать)\n"
         "   права: vg, bng, mp, server, tg, mod (модерация)\n"
         "/ban имя 10m причина — бан (m — минуты, h — часы, d — дни, perm — навсегда)\n"
-        "/unban имя — снять бан")
+        "/unban имя — снять бан\n"
+        "/news текст — опубликовать новость в лаунчере (ссылка в тексте станет кнопкой)\n"
+        "/newsdel 5 — удалить новость №5")
 
 
 def parse_minutes(s):
@@ -643,6 +661,18 @@ def handle_admin(msg, chat_id, text):
         if m:
             touch_ticket(int(m.group(1)), status="closed")
             return call("sendMessage", chat_id=ADMIN, text=f"Тикет #{m.group(1)} закрыт")
+    m = re.match(r"/news\s+(.+)", text, re.S)
+    if m:
+        body = m.group(1).strip()[:2000]
+        with _db_lock:
+            rows = rest("POST", "news_posts", body={"text": body, "created": int(time.time())},
+                        prefer="return=representation")
+        return call("sendMessage", chat_id=ADMIN, text=f"✅ Новость #{rows[0]['id']} опубликована в лаунчере")
+    m = re.match(r"/newsdel\s+#?(\d+)\s*$", text.strip())
+    if m:
+        with _db_lock:
+            rest("DELETE", "news_posts", f"id=eq.{int(m.group(1))}", prefer="return=minimal")
+        return call("sendMessage", chat_id=ADMIN, text=f"Новость #{m.group(1)} удалена")
     if text.startswith("/requests"):
         rows = rest("GET", "role_requests", "status=eq.new&order=id.asc&limit=30&select=id,username,role")
         lines = [f"#{r['id']} · {r['username']} → {ROLE_TITLE.get(r['role'], r['role'])}" for r in rows]
