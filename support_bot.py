@@ -323,6 +323,7 @@ def api_tilda(query, raw, ctype, ip):
     else:
         data = {k: v[0] for k, v in urllib.parse.parse_qs(raw.decode("utf-8", "replace"),
                                                          keep_blank_values=True).items()}
+    data = {str(k).strip().lower(): v for k, v in data.items()}  # Tilda шлёт «Name», «Email», «Phone»
     name = str(data.get("name") or "").strip()[:60]
     contact = str(data.get("email") or data.get("phone") or data.get("contact") or "").strip()[:80]
     if not name:
@@ -545,7 +546,12 @@ def who(u):
     return f"{name}" + (f" (@{u['username']})" if u.get("username") else "") + f" · id {u['id']}"
 
 
+ROLE_TITLE = {"moderator": "Модератор", "smm": "Директор СММ"}
+
 HELP = ("Команды:\n"
+        "/requests — новые заявки на роль\n"
+        "/approve 5 — одобрить заявку №5 (выдать роль)\n"
+        "/reject 5 — отклонить заявку №5\n"
         "/t 12 текст — ответ в тикет №12\n"
         "/to 123456 текст — написать человеку по chat id\n"
         "/tickets — открытые тикеты\n"
@@ -637,6 +643,35 @@ def handle_admin(msg, chat_id, text):
         if m:
             touch_ticket(int(m.group(1)), status="closed")
             return call("sendMessage", chat_id=ADMIN, text=f"Тикет #{m.group(1)} закрыт")
+    if text.startswith("/requests"):
+        rows = rest("GET", "role_requests", "status=eq.new&order=id.asc&limit=30&select=id,username,role")
+        lines = [f"#{r['id']} · {r['username']} → {ROLE_TITLE.get(r['role'], r['role'])}" for r in rows]
+        return call("sendMessage", chat_id=ADMIN, text="Новые заявки:\n" + ("\n".join(lines) or "нет"))
+    m = re.match(r"/(approve|reject)\s+#?(\d+)\s*$", text.strip())
+    if m:
+        rows = rest("GET", "role_requests", f"id=eq.{int(m.group(2))}&select=*")
+        if not rows or rows[0]["status"] != "new":
+            return call("sendMessage", chat_id=ADMIN, text="Заявка не найдена или уже обработана")
+        req = rows[0]
+        title = ROLE_TITLE.get(req["role"], req["role"])
+        if m.group(1) == "approve":
+            u = user_by_name(req["username"])
+            if not u:
+                return call("sendMessage", chat_id=ADMIN, text="Аккаунт из заявки не найден")
+            with _db_lock:
+                rest("PATCH", "users", f"id=eq.{int(u['id'])}",
+                     body={"role": req["role"], "perms": PRESETS[req["role"]]}, prefer="return=minimal")
+            status = "approved"
+            admin_note = f"✅ {req['username']} получил роль «{title}»"
+            player_note = f"✅ Ваша заявка на роль «{title}» одобрена. Права обновятся в лаунчере в течение 30 секунд."
+        else:
+            status = "rejected"
+            admin_note = f"❌ Заявка #{req['id']} от {req['username']} отклонена"
+            player_note = f"❌ Заявка на роль «{title}» отклонена. Вопросы — в поддержке."
+        with _db_lock:
+            rest("PATCH", "role_requests", f"id=eq.{int(req['id'])}", body={"status": status}, prefer="return=minimal")
+        call("sendMessage", chat_id=req["tg_chat"], text=player_note)
+        return call("sendMessage", chat_id=ADMIN, text=admin_note)
     rep = msg.get("reply_to_message")
     if not rep:
         return call("sendMessage", chat_id=ADMIN, text="Чтобы ответить, нажмите «Ответить» на нужное сообщение.\n"
@@ -668,6 +703,27 @@ def handle(msg):
                          "Удобнее вести обращения во вкладке «Поддержка» в лаунчере.")
     if not ADMIN:
         return call("sendMessage", chat_id=chat_id, text="Поддержка пока не настроена.")
+    if text.startswith("/request"):
+        m = re.match(r"/request\s+(\S+)\s+(moderator|smm)\s*$", text.strip())
+        if not m:
+            return call("sendMessage", chat_id=chat_id,
+                        text="Формат: /request логин moderator  или  /request логин smm\n"
+                             "Логин — ваш логин в лаунчере.")
+        if not user_by_name(m.group(1)):
+            return call("sendMessage", chat_id=chat_id,
+                        text="Аккаунт с таким логином не найден. Сначала зарегистрируйтесь в лаунчере.")
+        if not rate_ok("req:%d" % chat_id, 3, 86400):
+            return call("sendMessage", chat_id=chat_id, text="Слишком много заявок за сутки.")
+        with _db_lock:
+            rows = rest("POST", "role_requests", body={"username": m.group(1), "role": m.group(2),
+                                                       "tg_chat": chat_id, "status": "new",
+                                                       "created": int(time.time())},
+                        prefer="return=representation")
+        rid = rows[0]["id"]
+        call("sendMessage", chat_id=ADMIN,
+             text=f"📝 Заявка #{rid}: {m.group(1)} → {ROLE_TITLE[m.group(2)]}\n"
+                  f"/approve {rid} — выдать  ·  /reject {rid} — отклонить")
+        return call("sendMessage", chat_id=chat_id, text=f"Заявка #{rid} отправлена. Ожидайте решения.")
     if is_profane(text):
         call("sendMessage", chat_id=chat_id,
              text="Сообщение не отправлено: в нём нецензурная лексика. Опишите вопрос без мата, пожалуйста.")
