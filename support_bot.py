@@ -32,6 +32,7 @@ ADMIN = int(os.environ.get("ADMIN_ID") or CFG.get("admin_id") or 0)
 PORT = int(os.environ.get("PORT") or os.environ.get("SUPPORT_PORT") or CFG.get("port") or 8787)
 SB_URL = (os.environ.get("SUPABASE_URL") or CFG.get("supabase_url", "")).rstrip("/")
 SB_KEY = os.environ.get("SUPABASE_KEY") or CFG.get("supabase_key", "")
+TILDA_KEY = os.environ.get("TILDA_KEY") or CFG.get("tilda_key", "")  # секрет для вебхука сайта
 OFFLINE = bool(os.environ.get("SUPPORT_OFFLINE"))  # только для тестов
 API = f"https://api.telegram.org/bot{TOKEN}/"
 
@@ -310,6 +311,29 @@ def api_change_password(user, d):
     return 200, {"ok": True}
 
 
+def api_tilda(query, raw, ctype, ip):
+    """Вебхук формы с сайта Tilda. Только уведомляет админа — роли не выдаёт."""
+    key = urllib.parse.parse_qs(query).get("key", [""])[0]
+    if not TILDA_KEY or not hmac.compare_digest(key, TILDA_KEY):
+        return 403, {"error": "forbidden"}
+    if not rate_ok("tilda:" + ip, 30, 3600):
+        return 429, {"error": "too many"}
+    if "json" in ctype:
+        data = json.loads(raw or b"{}")
+    else:
+        data = {k: v[0] for k, v in urllib.parse.parse_qs(raw.decode("utf-8", "replace"),
+                                                         keep_blank_values=True).items()}
+    name = str(data.get("name") or "").strip()[:60]
+    contact = str(data.get("email") or data.get("phone") or data.get("contact") or "").strip()[:80]
+    if not name:
+        return 400, {"error": "no name"}
+    if ADMIN:
+        call("sendMessage", chat_id=ADMIN, text=(
+            f"🌐 Заявка с сайта\nИмя: {name}\nКонтакт: {contact or '—'}\n\n"
+            f"Если это аккаунт в лаунчере, выдайте роль:\n/role {name} moderator  (или smm)"))
+    return 200, {"ok": True}
+
+
 def api_list(user, d):
     rows = rest("GET", "tickets", f"user_id=eq.{int(user['id'])}&order=updated.desc&limit=100"
                                   f"&select=id,subject,status,updated")
@@ -481,9 +505,13 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
             if n > 20000:
                 return self._reply(413, {"error": "too large"})
-            d = json.loads(self.rfile.read(n) or b"{}")
+            raw = self.rfile.read(n)
             ip = (self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
                   or self.client_address[0])
+            url = urllib.parse.urlparse(self.path)
+            if url.path == "/api/tilda":
+                return self._reply(*api_tilda(url.query, raw, self.headers.get("Content-Type", ""), ip))
+            d = json.loads(raw or b"{}")
             if self.path == "/api/register":
                 return self._reply(*api_register(d, ip))
             if self.path == "/api/login":
