@@ -32,6 +32,7 @@ ADMIN = int(os.environ.get("ADMIN_ID") or CFG.get("admin_id") or 0)
 PORT = int(os.environ.get("PORT") or os.environ.get("SUPPORT_PORT") or CFG.get("port") or 8787)
 SB_URL = (os.environ.get("SUPABASE_URL") or CFG.get("supabase_url", "")).rstrip("/")
 SB_KEY = os.environ.get("SUPABASE_KEY") or CFG.get("supabase_key", "")
+APP_URL = os.environ.get("APP_URL") or CFG.get("app_url", "")  # https://…/app — адрес Mini App
 TILDA_KEY = os.environ.get("TILDA_KEY") or CFG.get("tilda_key", "")  # секрет для вебхука сайта
 OFFLINE = bool(os.environ.get("SUPPORT_OFFLINE"))  # только для тестов
 API = f"https://api.telegram.org/bot{TOKEN}/"
@@ -371,6 +372,41 @@ def can_post_section(user, sec):
     if acc == "staff":
         return can_moderate(user)
     return user.get("role") == "admin"
+
+
+def tg_check_init(init_data):
+    """Проверка подписи initData из Telegram Mini App (алгоритм Telegram)."""
+    pairs = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
+    h = pairs.pop("hash", "")
+    if not h or not TOKEN:
+        return None
+    check = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
+    secret = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+    calc = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc, h):
+        return None
+    if time.time() - int(pairs.get("auth_date", "0") or 0) > 86400:
+        return None
+    try:
+        return json.loads(pairs.get("user", "{}"))
+    except Exception:
+        return None
+
+
+def api_tg_auth(d, ip):
+    if not rate_ok("tgauth:" + ip, 30, 600):
+        return 429, {"error": "Слишком часто, подождите"}
+    tg = tg_check_init(str(d.get("initData", "")))
+    if not tg or not tg.get("id"):
+        return 401, {"error": "Откройте приложение из Telegram-бота"}
+    rows = rest("GET", "users", f"tg_chat=eq.{int(tg['id'])}&select=id")
+    if not rows:
+        return 404, {"error": "Аккаунт не привязан. В лаунчере: Аккаунт → «Привязать Telegram», затем в боте /link КОД"}
+    u = user_by_id(rows[0]["id"])
+    b = ban_info(u)
+    if b:
+        return 403, {"error": "Аккаунт заблокирован", **b}
+    return 200, {"token": new_session(u["id"]), "username": u["username"], "role": u.get("role") or "base"}
 
 
 def api_forum_public(query=""):
@@ -744,6 +780,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/ping":
             return self._reply(200, {"ok": True})
         path, _, query = self.path.partition("?")
+        if path in ("/app", "/app/"):
+            try:
+                body = (BASE / "webapp.html").read_bytes()
+            except Exception:
+                return self._reply(500, {"error": "webapp.html не найден рядом с support_bot.py"})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/forum/stats":
             try:
                 return self._reply(200, api_forum_stats())
@@ -780,6 +828,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._reply(*api_register(d, ip))
             if self.path == "/api/login":
                 return self._reply(*api_login(d, ip))
+            if self.path == "/api/tg/auth":
+                return self._reply(*api_tg_auth(d, ip))
             fn = ROUTES_AUTH.get(self.path)
             if not fn:
                 return self._reply(404, {"error": "not found"})
@@ -975,6 +1025,12 @@ def handle(msg):
     text = msg.get("text", "")
     user = msg.get("from", {})
 
+    if re.match(r"/app(\s|@|$)", text.strip()):
+        if not APP_URL:
+            return call("sendMessage", chat_id=chat_id, text="Адрес приложения не задан (APP_URL на сервере).")
+        return call("sendMessage", chat_id=chat_id, text="BeamLDrive: форум и поддержка прямо в Telegram.",
+                    reply_markup={"inline_keyboard": [[{"text": "Открыть BeamLDrive", "web_app": {"url": APP_URL}}]]})
+
     m = re.match(r"/link\s+(\d{6})\s*$", text.strip())
     if m and chat_id != ADMIN:
         h = hashlib.sha256(m.group(1).encode()).hexdigest()
@@ -1040,6 +1096,7 @@ USER_COMMANDS = [
     {"command": "start", "description": "Начать / справка о поддержке"},
     {"command": "link", "description": "Привязать Telegram: /link КОД из лаунчера"},
     {"command": "request", "description": "Заявка на роль: /request логин moderator"},
+    {"command": "app", "description": "Открыть приложение BeamLDrive (форум)"},
     {"command": "id", "description": "Узнать свой chat id"},
 ]
 ADMIN_COMMANDS = USER_COMMANDS + [
@@ -1055,6 +1112,9 @@ ADMIN_COMMANDS = USER_COMMANDS + [
 def setup_commands():
     """Меню команд в Telegram: пользователям — свои, админу — полный список."""
     call("setMyCommands", commands=USER_COMMANDS, scope={"type": "all_private_chats"})
+    if APP_URL:  # кнопка «меню» слева от поля ввода открывает Mini App
+        call("setChatMenuButton", menu_button={"type": "web_app", "text": "BeamLDrive",
+                                               "web_app": {"url": APP_URL}})
     if ADMIN:
         call("setMyCommands", commands=ADMIN_COMMANDS, scope={"type": "chat", "chat_id": ADMIN})
 
