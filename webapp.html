@@ -189,6 +189,253 @@
     $("title").textContent = known ? known.title : curTitle;
     var acc = known ? known.access : "all";
     var staffRoles = ["admin", "moderator", "smm"];
+    var canHere = !!token && roleNow === "admin";
+    $("composeBox").classList.toggle("hidden", !canHere);
+    if (!token) setStatus("Чтобы писать, привяжите Telegram в лаунчере и откройте приложение из бота.");
+    else if (!canHere) setStatus("В этот раздел писать нельзя (только чтение).");
+    else setStatus("");
+    loadPosts();
+  }
+  function loadPosts() {
+    if (!curSec) return;
+    api("/api/forum?section=" + encodeURIComponent(curSec)).then(function (d) {
+      var box = $("posts"); box.innerHTML = "";
+      var rows = d.posts || [];
+      if (!rows.length) box.innerHTML = '<div class="status">В этом разделе пока нет сообщений.</div>';
+      rows.forEach(function (p) {
+        var el = document.createElement("div");
+        el.className = "post" + (p.pinned ? " pinned" : "");
+        el.innerHTML = (p.pinned ? "<div class=\"pin\">📌 закреплено</div>" : "")
+          + "<div><span class=\"who\">" + esc(p.username) + "</span><span class=\"when\">" + when(p.created) + "</span></div>"
+          + "<div class=\"txt\">" + esc(p.text) + "</div>";
+        box.appendChild(el);
+      });
+      window.scrollTo(0, 0);
+    }).catch(function (e) { setStatus("Не удалось загрузить: " + e.message); });
+  }
+
+  $("back").onclick = function () { showGroups(); };
+  $("reload").onclick = function () { loadGroups(); loadLatest(); if (curSec) loadPosts(); };
+
+  $("send").onclick = function () {
+    var txt = $("msg").value.trim();
+    if (!txt || !curSec || !token) return;
+    $("send").disabled = true;
+    api("/api/forum/post", { token: token, text: txt, section: curSec }).then(function () {
+      $("msg").value = ""; setStatus("Отправлено", true); loadPosts(); loadLatest();
+    }).catch(function (e) { setStatus(e.message); }).then(function () { $("send").disabled = false; });
+  };
+
+  /* ── вход через Telegram ── */
+  function login() {
+    var initData = tg && tg.initData;
+    if (!initData) { setStatus("Откройте приложение из Telegram-бота, чтобы писать."); return Promise.resolve(); }
+    return api("/api/tg/auth", { initData: initData }).then(function (d) {
+      token = d.token; roleNow = d.role || "base";
+      setStatus("Вы вошли как " + d.username, true);
+    }).catch(function (e) { setStatus(e.message); });
+  }
+
+  /* старт: сначала разделы (знаем права каждого раздела), потом вход и строка */
+  loadGroups().then(function () {
+    return login();
+  });
+  loadLatest();
+})();
+</script>
+</body>
+</html>
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BeamLDrive</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: #141418; --card: #1e1e25; --card2: #26262f; --line: #2f2f3a;
+    --fg: #f2f2f5; --dim: #8e8e9a; --accent: #e0343d; --ok: #3ccf7a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f4f4f7; --card: #ffffff; --card2: #ececf2; --line: #d8d8e0;
+            --fg: #18181d; --dim: #6a6a78; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg);
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; font-size: 15px; }
+  body { min-height: 100vh; padding-bottom: 24px; }
+
+  /* маленькая строка: последние сообщения форума, одна строка, меняется сама */
+  .strip { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 10px;
+    background: var(--card); border-bottom: 2px solid var(--accent); padding: 0 14px; height: 40px;
+    cursor: pointer; }
+  .strip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+  .strip .tick { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-size: 13px; color: var(--fg); }
+  .strip .tick b { color: var(--accent); font-weight: 600; }
+  .strip .tick.fade { opacity: 0; transition: opacity .25s; }
+  .strip .tick { transition: opacity .25s; }
+
+  header { display: flex; align-items: center; gap: 10px; padding: 14px 14px 6px; }
+  header h1 { font-size: 18px; margin: 0; color: var(--accent); flex: 1; }
+  .status { font-size: 12px; color: var(--dim); padding: 0 14px 8px; min-height: 16px; }
+  .status.ok { color: var(--ok); }
+
+  .btn { border: 1px solid var(--line); background: var(--card2); color: var(--fg); border-radius: 999px;
+    padding: 7px 14px; font: inherit; font-size: 13px; cursor: pointer; }
+  .btn.accent { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:disabled { opacity: .45; cursor: default; }
+
+  main { padding: 0 14px; }
+  .group { margin-top: 14px; }
+  .group h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim);
+    margin: 0 0 6px; padding-bottom: 4px; border-bottom: 2px solid var(--accent); }
+  .sec { display: block; width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; color: var(--fg); font: inherit; cursor: pointer; }
+  .sec .t { font-weight: 600; font-size: 15px; }
+  .sec .d { color: var(--dim); font-size: 12px; margin-top: 2px; }
+  .sec .last { color: var(--dim); font-size: 12px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sec .last b { color: var(--accent); font-weight: 600; }
+  .sec .meta { float: right; color: var(--dim); font-size: 11px; text-align: right; margin-left: 8px; }
+  .lock { font-size: 11px; color: var(--dim); }
+
+  .post { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; }
+  .post.pinned { border-color: var(--accent); }
+  .post .who { font-size: 12px; color: var(--accent); font-weight: 600; }
+  .post .when { font-size: 11px; color: var(--dim); margin-left: 6px; font-weight: 400; }
+  .post .pin { font-size: 11px; color: var(--accent); margin-bottom: 4px; }
+  .post .txt { margin-top: 4px; white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
+
+  .compose { position: sticky; bottom: 0; background: var(--bg); padding: 10px 0 4px; display: flex; gap: 8px; }
+  .compose textarea { flex: 1; resize: none; min-height: 40px; max-height: 120px; border-radius: 12px;
+    border: 1px solid var(--line); background: var(--card); color: var(--fg); padding: 10px; font: inherit; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="strip" id="strip" title="Открыть форум">
+  <span class="dot"></span>
+  <span class="tick" id="tick">Загрузка форума…</span>
+</div>
+
+<header>
+  <button class="btn hidden" id="back">← Назад</button>
+  <h1 id="title">Форум BeamLDrive</h1>
+  <button class="btn" id="reload">↻</button>
+</header>
+<div class="status" id="status"></div>
+
+<main>
+  <section id="viewGroups"></section>
+  <section id="viewPosts" class="hidden">
+    <div id="posts"></div>
+    <div class="compose" id="composeBox">
+      <textarea id="msg" placeholder="Написать сообщение…" maxlength="1000" rows="1"></textarea>
+      <button class="btn accent" id="send">Отправить</button>
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+
+  var token = null, groups = [], latest = [], tickIdx = 0, curSec = null, curTitle = "";
+  var $ = function (id) { return document.getElementById(id); };
+
+  function esc(s) { var d = document.createElement("div"); d.textContent = String(s == null ? "" : s); return d.innerHTML; }
+  function setStatus(text, ok) { var el = $("status"); el.textContent = text || ""; el.className = "status" + (ok ? " ok" : ""); }
+  function when(ts) {
+    var d = new Date(ts * 1000);
+    var p = function (n) { return (n < 10 ? "0" : "") + n; };
+    return p(d.getDate()) + "." + p(d.getMonth() + 1) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+
+  function api(path, body) {
+    var opt = { method: body ? "POST" : "GET", headers: {} };
+    if (body) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+    return fetch(path, opt).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        if (!r.ok) { var e = new Error(d.error || ("Ошибка " + r.status)); e.data = d; throw e; }
+        return d;
+      });
+    });
+  }
+
+  /* ── строка: последние сообщения, по одному по кругу ── */
+  function loadLatest() {
+    return api("/api/forum").then(function (d) {
+      latest = (d.posts || []).slice(0, 15);
+      tickIdx = 0; showTick();
+    }).catch(function () { $("tick").textContent = "Форум временно недоступен"; });
+  }
+  function showTick() {
+    var el = $("tick");
+    if (!latest.length) { el.innerHTML = "Пока нет сообщений"; return; }
+    var p = latest[tickIdx % latest.length];
+    el.classList.add("fade");
+    setTimeout(function () {
+      el.innerHTML = "<b>" + esc(p.username) + ":</b> " + esc(String(p.text).replace(/\s+/g, " "));
+      el.classList.remove("fade");
+    }, 250);
+  }
+  setInterval(function () {
+    if (latest.length > 1) { tickIdx = (tickIdx + 1) % latest.length; showTick(); }
+  }, 4000);
+  $("strip").onclick = function () {
+    if (latest.length) { var p = latest[tickIdx % latest.length]; openSection(p.section || "general", null); }
+    else showGroups();
+  };
+
+  /* ── разделы ── */
+  function loadGroups() {
+    return api("/api/forum/stats").then(function (d) {
+      groups = d.groups || []; renderGroups();
+    }).catch(function (e) { setStatus("Не удалось загрузить разделы: " + e.message); });
+  }
+  function renderGroups() {
+    var box = $("viewGroups"); box.innerHTML = "";
+    if (!groups.length) { box.innerHTML = '<div class="status">Разделов пока нет.</div>'; return; }
+    groups.forEach(function (g) {
+      var wrap = document.createElement("div"); wrap.className = "group";
+      wrap.innerHTML = "<h2>" + esc(g.title) + "</h2>";
+      g.sections.forEach(function (s) {
+        var b = document.createElement("button"); b.className = "sec";
+        var last = s.last ? "<div class=\"last\"><b>" + esc(s.last.username) + ":</b> " + esc(s.last.text) + "</div>" : "";
+        var note = s.access === "admin" ? " <span class=\"lock\">· только чтение</span>"
+                 : s.access === "staff" ? " <span class=\"lock\">· только модераторы</span>" : "";
+        b.innerHTML = "<div class=\"meta\">" + s.users + " уч.<br>" + s.posts + " сообщ.</div>"
+                    + "<div class=\"t\">" + esc(s.title) + note + "</div>"
+                    + "<div class=\"d\">" + esc(s.desc) + "</div>" + last;
+        b.onclick = function () { openSection(s.key, s.title); };
+        wrap.appendChild(b);
+      });
+      box.appendChild(wrap);
+    });
+  }
+
+  /* ── сообщения раздела ── */
+  var roleNow = "base";
+
+  function showGroups() {
+    curSec = null;
+    $("viewPosts").classList.add("hidden"); $("viewGroups").classList.remove("hidden");
+    $("back").classList.add("hidden"); $("title").textContent = "Форум BeamLDrive";
+    setStatus("");
+  }
+  function openSection(key, title) {
+    curSec = key; curTitle = title || key;
+    $("viewGroups").classList.add("hidden"); $("viewPosts").classList.remove("hidden");
+    $("back").classList.remove("hidden");
+    var known = null;
+    groups.forEach(function (g) { g.sections.forEach(function (s) { if (s.key === key) known = s; }); });
+    $("title").textContent = known ? known.title : curTitle;
+    var acc = known ? known.access : "all";
+    var staffRoles = ["admin", "moderator", "smm"];
     var canHere = !!token && (acc === "all" || (acc === "staff" && staffRoles.indexOf(roleNow) >= 0)
                   || (acc === "admin" && roleNow === "admin"));
     $("composeBox").classList.toggle("hidden", !canHere);
