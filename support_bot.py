@@ -132,7 +132,9 @@ def create_user(username, salt, pw, contact):
             rows = rest("POST", "users", body={
                 "uname": username.lower(), "username": username, "salt": salt, "pw": pw,
                 "contact": contact, "created": int(time.time()),
-                "role": "base", "perms": PRESETS["base"], "banned_until": 0, "ban_reason": ""},
+                "role": "base", "perms": PRESETS["base"], "banned_until": 0, "ban_reason": "",
+                "email": contact.lower() if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", contact or "") else "",
+                "tg_chat": 0},
                 prefer="return=representation")
         return rows[0]
     except RuntimeError as e:
@@ -168,10 +170,18 @@ def can_moderate(u):
     return "mod" in user_perms(u)
 
 
+def mask_email(e):
+    if not e or "@" not in e:
+        return ""
+    name, dom = e.split("@", 1)
+    return name[:2] + "***@" + dom
+
+
 def user_view(u):
     return {"username": u["username"], "role": u.get("role") or "base",
             "perms": sorted(user_perms(u)), "contact": u.get("contact") or "",
-            "banned_until": int(u.get("banned_until") or 0), "ban_reason": u.get("ban_reason") or ""}
+            "banned_until": int(u.get("banned_until") or 0), "ban_reason": u.get("ban_reason") or "",
+            "email": mask_email(u.get("email") or ""), "tg": bool(u.get("tg_chat"))}
 
 
 def ban_info(u):
@@ -366,6 +376,112 @@ def api_forum_post(user, d):
     return 200, {"ok": True}
 
 
+CODE_TTL = 600
+PURPOSES = ("password", "email")
+
+
+def smtp_send(to, subject, body):
+    import smtplib
+    from email.message import EmailMessage
+    host = os.environ.get("SMTP_HOST", "")
+    user = os.environ.get("SMTP_USER", "")
+    sender = os.environ.get("SMTP_FROM") or user
+    if not host or not sender:
+        raise RuntimeError("почта на сервере не настроена")
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = subject, sender, to
+    msg.set_content(body)
+    with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT") or 587), timeout=20) as smtp:
+        smtp.starttls()
+        smtp.login(user, os.environ.get("SMTP_PASS", ""))
+        smtp.send_message(msg)
+
+
+def make_code(user_id, purpose, extra=""):
+    code = f"{secrets.randbelow(10 ** 6):06d}"
+    with _db_lock:
+        rest("DELETE", "account_codes", f"user_id=eq.{int(user_id)}&purpose=eq.{q(purpose)}",
+             prefer="return=minimal")
+        rest("POST", "account_codes", body={
+            "user_id": user_id, "purpose": purpose, "extra": extra,
+            "code_hash": hashlib.sha256(code.encode()).hexdigest(),
+            "expires": int(time.time()) + CODE_TTL, "attempts": 0}, prefer="return=minimal")
+    return code
+
+
+def api_tg_link(user, d):
+    code = make_code(user["id"], "tglink")
+    return 200, {"code": code}
+
+
+def api_code_request(user, d):
+    purpose = str(d.get("purpose", ""))
+    if purpose not in PURPOSES:
+        return 400, {"error": "Неверный запрос"}
+    if not rate_ok("acc:%d" % user["id"], 6, 3600):
+        return 429, {"error": "Слишком много запросов кода, подождите час"}
+    extra = ""
+    if purpose == "email":
+        extra = str(d.get("new_email", "")).strip().lower()[:120]
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", extra):
+            return 400, {"error": "Введите корректную новую почту"}
+    code = make_code(user["id"], purpose, extra)
+    what = "смены пароля" if purpose == "password" else "привязки новой почты"
+    text = f"Код для {what}: {code}\nДействует 10 минут. Если это были не вы — просто проигнорируйте."
+    if user.get("email") and purpose == "email":  # пароль меняем только через Telegram
+        try:
+            smtp_send(user["email"], "BeamLDrive: код подтверждения", text)
+        except Exception as e:
+            return 502, {"error": f"Не удалось отправить письмо: {e}"}
+        return 200, {"channel": "почта", "to": mask_email(user["email"])}
+    if user.get("tg_chat"):
+        r = call("sendMessage", chat_id=int(user["tg_chat"]), text=text)
+        if not r.get("ok"):
+            return 502, {"error": "Не удалось отправить код в Telegram"}
+        return 200, {"channel": "Telegram"}
+    if purpose == "password":
+        return 400, {"error": "Для смены пароля привяжите Telegram (кнопка «Привязать Telegram»)"}
+    return 400, {"error": "Сначала привяжите Telegram, чтобы получить код"}
+
+
+def api_code_confirm(user, d):
+    purpose = str(d.get("purpose", ""))
+    if purpose not in PURPOSES:
+        return 400, {"error": "Неверный запрос"}
+    rows = rest("GET", "account_codes", f"user_id=eq.{int(user['id'])}&purpose=eq.{q(purpose)}&select=*")
+    if not rows:
+        return 400, {"error": "Сначала запросите код"}
+    row = rows[0]
+    if int(row["expires"]) < int(time.time()):
+        rest("DELETE", "account_codes", f"user_id=eq.{int(user['id'])}&purpose=eq.{q(purpose)}",
+             prefer="return=minimal")
+        return 400, {"error": "Код истёк, запросите новый"}
+    if int(row["attempts"]) >= 5:
+        return 400, {"error": "Слишком много неверных попыток, запросите новый код"}
+    code = str(d.get("code", "")).strip()
+    if not hmac.compare_digest(row["code_hash"], hashlib.sha256(code.encode()).hexdigest()):
+        with _db_lock:
+            rest("PATCH", "account_codes", f"user_id=eq.{int(user['id'])}&purpose=eq.{q(purpose)}",
+                 body={"attempts": int(row["attempts"]) + 1}, prefer="return=minimal")
+        return 400, {"error": "Неверный код"}
+    if purpose == "password":
+        new = str(d.get("new_password", ""))
+        if len(new) < 6 or len(new) > 100:
+            return 400, {"error": "Новый пароль: от 6 символов"}
+        salt = secrets.token_hex(16)
+        with _db_lock:
+            rest("PATCH", "users", f"id=eq.{int(user['id'])}",
+                 body={"salt": salt, "pw": hash_pw(new, salt)}, prefer="return=minimal")
+    else:
+        with _db_lock:
+            rest("PATCH", "users", f"id=eq.{int(user['id'])}", body={"email": row["extra"]},
+                 prefer="return=minimal")
+    with _db_lock:
+        rest("DELETE", "account_codes", f"user_id=eq.{int(user['id'])}&purpose=eq.{q(purpose)}",
+             prefer="return=minimal")
+    return 200, {"ok": True}
+
+
 def api_list(user, d):
     rows = rest("GET", "tickets", f"user_id=eq.{int(user['id'])}&order=updated.desc&limit=100"
                                   f"&select=id,subject,status,updated")
@@ -511,6 +627,8 @@ ROUTES_AUTH = {
     "/api/staff/tickets": api_staff_tickets, "/api/staff/messages": api_staff_messages,
     "/api/staff/reply": api_staff_reply, "/api/staff/ban": api_staff_ban,
     "/api/forum/post": api_forum_post,
+    "/api/account/tglink": api_tg_link, "/api/account/code": api_code_request,
+    "/api/account/confirm": api_code_confirm,
 }
 
 
@@ -756,6 +874,22 @@ def handle(msg):
     text = msg.get("text", "")
     user = msg.get("from", {})
 
+    m = re.match(r"/link\s+(\d{6})\s*$", text.strip())
+    if m and chat_id != ADMIN:
+        h = hashlib.sha256(m.group(1).encode()).hexdigest()
+        rows = rest("GET", "account_codes", f"purpose=eq.tglink&code_hash=eq.{h}&select=*")
+        if not rows or int(rows[0]["expires"]) < int(time.time()):
+            return call("sendMessage", chat_id=chat_id,
+                        text="Код неверный или истёк. Получите новый в лаунчере (Аккаунт → «Привязать Telegram»).")
+        u = user_by_id(rows[0]["user_id"])
+        with _db_lock:
+            rest("PATCH", "users", f"id=eq.{int(rows[0]['user_id'])}", body={"tg_chat": chat_id},
+                 prefer="return=minimal")
+            rest("DELETE", "account_codes", f"user_id=eq.{int(rows[0]['user_id'])}&purpose=eq.tglink",
+                 prefer="return=minimal")
+        return call("sendMessage", chat_id=chat_id,
+                    text=f"✅ Telegram привязан к аккаунту {u['username'] if u else ''}. "
+                         "Коды подтверждения будут приходить сюда.")
     if text.strip().lower() in ("/id", "/start id"):
         return call("sendMessage", chat_id=chat_id, text=f"Ваш chat id: {chat_id}")
     if chat_id == ADMIN:
