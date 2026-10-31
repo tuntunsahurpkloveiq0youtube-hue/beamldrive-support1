@@ -1,4 +1,3 @@
-
 """
 BeamLDrive — сервер поддержки: Telegram-бот + API для лаунчера.
 Данные хранятся в Supabase (PostgreSQL).
@@ -371,9 +370,16 @@ def forum_info(key):
     return rows[0] if rows else None
 
 
+FORUM_ACCESS = ("admin", "staff", "all")  # кто пишет: только разработчик / модераторы и разработчик / все игроки
+
+
 def can_post_section(user, sec):
-    # писать в форум может только разработчик; модераторы удаляют сообщения отдельным маршрутом
-    return user.get("role") == "admin"
+    acc = sec.get("access") or "all"
+    if acc == "all":
+        return True                      # любой вошедший игрок
+    if acc == "staff":
+        return can_moderate(user)        # модераторы, СММ, разработчик
+    return user.get("role") == "admin"   # только разработчик
 
 
 def tg_check_init(init_data):
@@ -596,6 +602,20 @@ def api_forum_section_create(user, d):
                                              "descr": "Обсуждение сервера", "access": "admin", "pos": 9},
              prefer="return=minimal")
     return 200, {"key": key}
+
+
+def api_admin_section_access(user, d):
+    if not need_admin(user):
+        return 403, {"error": "Нет доступа"}
+    key = str(d.get("key", "")).strip()
+    acc = str(d.get("access", ""))
+    if acc not in FORUM_ACCESS:
+        return 400, {"error": "Неверный доступ"}
+    if not key or not forum_info(key):
+        return 404, {"error": "Раздел не найден"}
+    with _db_lock:
+        rest("PATCH", "forum_sections", f"key=eq.{q(key)}", body={"access": acc}, prefer="return=minimal")
+    return 200, {"ok": True}
 
 
 def api_forum_section_rename(user, d):
@@ -877,6 +897,7 @@ ROUTES_AUTH = {
     "/api/admin/users": api_admin_users, "/api/admin/role": api_admin_set_role,
     "/api/admin/forum/delete": api_admin_delete_post,
     "/api/admin/forum/section/delete": api_admin_delete_section,
+    "/api/admin/forum/section/access": api_admin_section_access,
     "/api/staff/news/list": api_staff_news_list, "/api/staff/news/create": api_staff_news_create,
     "/api/staff/news/delete": api_staff_news_delete, "/api/staff/forum/delete": api_staff_forum_delete,
 }
