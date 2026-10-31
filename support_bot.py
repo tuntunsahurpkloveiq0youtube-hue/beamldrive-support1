@@ -33,6 +33,10 @@ PORT = int(os.environ.get("PORT") or os.environ.get("SUPPORT_PORT") or CFG.get("
 SB_URL = (os.environ.get("SUPABASE_URL") or CFG.get("supabase_url", "")).rstrip("/")
 SB_KEY = os.environ.get("SUPABASE_KEY") or CFG.get("supabase_key", "")
 APP_URL = os.environ.get("APP_URL") or CFG.get("app_url", "")  # https://…/app — адрес Mini App
+_base = APP_URL.rstrip("/")
+if _base.endswith("/app"):
+    _base = _base[:-4]
+PANEL_URL = (_base + "/panel") if APP_URL else ""  # панель разработчика как Mini App
 TILDA_KEY = os.environ.get("TILDA_KEY") or CFG.get("tilda_key", "")  # секрет для вебхука сайта
 OFFLINE = bool(os.environ.get("SUPPORT_OFFLINE"))  # только для тестов
 API = f"https://api.telegram.org/bot{TOKEN}/"
@@ -748,6 +752,119 @@ def api_staff_ban(user, d):
     return 200, {"ok": True, "banned_until": until}
 
 
+# ───────────────────────── Панель разработчика (/admin) ─────────────────────────
+def need_admin(user):
+    return user.get("role") == "admin"
+
+
+def api_admin_users(user, d):
+    if not need_admin(user):
+        return 403, {"error": "Нет доступа"}
+    rows = rest("GET", "users", "order=id.asc&limit=2000&select=id,username,role,banned_until,ban_reason,created,tg_chat,email")
+    out = [{"id": r["id"], "username": r["username"], "role": r.get("role") or "base",
+            "banned_until": int(r.get("banned_until") or 0), "ban_reason": r.get("ban_reason") or "",
+            "created": int(r.get("created") or 0), "tg": bool(r.get("tg_chat")),
+            "email": mask_email(r.get("email") or "")} for r in rows]
+    return 200, {"users": out}
+
+
+def api_admin_set_role(user, d):
+    if not need_admin(user):
+        return 403, {"error": "Нет доступа"}
+    target = user_by_name(str(d.get("username", "")))
+    if not target:
+        return 404, {"error": "Пользователь не найден"}
+    if target["id"] == user["id"]:
+        return 400, {"error": "Нельзя менять свою роль"}
+    role = str(d.get("role", ""))
+    if role not in ROLES:
+        return 400, {"error": "Неизвестная роль"}
+    with _db_lock:
+        rest("PATCH", "users", f"id=eq.{int(target['id'])}",
+             body={"role": role, "perms": PRESETS[role]}, prefer="return=minimal")
+    return 200, {"ok": True}
+
+
+def api_admin_delete_post(user, d):
+    if not need_admin(user):
+        return 403, {"error": "Нет доступа"}
+    try:
+        pid = int(d.get("id"))
+    except (TypeError, ValueError):
+        return 400, {"error": "Нет сообщения"}
+    with _db_lock:
+        rest("DELETE", "forum_posts", f"id=eq.{pid}", prefer="return=minimal")
+    return 200, {"ok": True}
+
+
+def api_admin_delete_section(user, d):
+    if not need_admin(user):
+        return 403, {"error": "Нет доступа"}
+    key = str(d.get("key", "")).strip()
+    if not key or not forum_info(key):
+        return 404, {"error": "Раздел не найден"}
+    with _db_lock:
+        rest("DELETE", "forum_posts", f"section=eq.{q(key)}", prefer="return=minimal")
+        rest("DELETE", "forum_sections", f"key=eq.{q(key)}", prefer="return=minimal")
+    return 200, {"ok": True}
+
+
+# ───────────────────────── Панель модераторов и СММ (/staff) ─────────────────────────
+def has_perm(u, perm):
+    return perm in user_perms(u)
+
+
+def api_staff_news_list(user, d):
+    if not has_perm(user, "tg"):
+        return 403, {"error": "Нет доступа"}
+    rows = rest("GET", "news_posts", "order=id.desc&limit=50&select=id,text,created")
+    return 200, {"news": rows}
+
+
+def api_staff_news_create(user, d):
+    if not has_perm(user, "tg"):
+        return 403, {"error": "Нет доступа"}
+    text = str(d.get("text", "")).strip()[:1000]
+    if len(text) < 3:
+        return 400, {"error": "Текст новости слишком короткий"}
+    if is_profane(text):
+        return 400, {"error": "В тексте есть запрещённые слова"}
+    with _db_lock:
+        rest("POST", "news_posts", body={"text": text, "created": int(time.time())}, prefer="return=minimal")
+    return 200, {"ok": True}
+
+
+def api_staff_news_delete(user, d):
+    if not has_perm(user, "tg"):
+        return 403, {"error": "Нет доступа"}
+    try:
+        nid = int(d.get("id"))
+    except (TypeError, ValueError):
+        return 400, {"error": "Нет новости"}
+    with _db_lock:
+        rest("DELETE", "news_posts", f"id=eq.{nid}", prefer="return=minimal")
+    return 200, {"ok": True}
+
+
+def api_staff_forum_delete(user, d):
+    """Модератор удаляет сообщения только в тех разделах, где может писать сам."""
+    if not can_moderate(user):
+        return 403, {"error": "Нет доступа"}
+    try:
+        pid = int(d.get("id"))
+    except (TypeError, ValueError):
+        return 400, {"error": "Нет сообщения"}
+    rows = rest("GET", "forum_posts", f"id=eq.{pid}&select=section")
+    if not rows:
+        return 404, {"error": "Сообщение не найдено"}
+    sec = forum_info(rows[0].get("section") or "general")
+    if sec and not can_post_section(user, sec):
+        return 403, {"error": "В этом разделе удалять может только разработчик"}
+    with _db_lock:
+        rest("DELETE", "forum_posts", f"id=eq.{pid}", prefer="return=minimal")
+    return 200, {"ok": True}
+
+
 ROUTES_AUTH = {
     "/api/me": api_me, "/api/account/password": api_change_password,
     "/api/tickets/list": api_list, "/api/tickets/messages": api_messages,
@@ -759,6 +876,11 @@ ROUTES_AUTH = {
     "/api/forum/section/rename": api_forum_section_rename,
     "/api/account/tglink": api_tg_link, "/api/account/code": api_code_request,
     "/api/account/confirm": api_code_confirm,
+    "/api/admin/users": api_admin_users, "/api/admin/role": api_admin_set_role,
+    "/api/admin/forum/delete": api_admin_delete_post,
+    "/api/admin/forum/section/delete": api_admin_delete_section,
+    "/api/staff/news/list": api_staff_news_list, "/api/staff/news/create": api_staff_news_create,
+    "/api/staff/news/delete": api_staff_news_delete, "/api/staff/forum/delete": api_staff_forum_delete,
 }
 
 
@@ -780,11 +902,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/ping":
             return self._reply(200, {"ok": True})
         path, _, query = self.path.partition("?")
-        if path in ("/app", "/app/"):
+        pages = {"/app": "webapp.html", "/admin": "admin.html", "/panel": "admin.html", "/staff": "staff.html"}
+        base_path = path.rstrip("/")
+        if base_path in pages:
+            page = pages[base_path]
             try:
-                body = (BASE / "webapp.html").read_bytes()
+                body = (BASE / page).read_bytes()
             except Exception:
-                return self._reply(500, {"error": "webapp.html не найден рядом с support_bot.py"})
+                return self._reply(500, {"error": f"{page} не найден рядом с support_bot.py"})
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -1025,6 +1150,14 @@ def handle(msg):
     text = msg.get("text", "")
     user = msg.get("from", {})
 
+    if re.match(r"/panel(\s|@|$)", text.strip()):
+        if chat_id != ADMIN:
+            return call("sendMessage", chat_id=chat_id, text="Панель доступна только разработчику.")
+        if not PANEL_URL:
+            return call("sendMessage", chat_id=chat_id, text="Адрес панели не задан (APP_URL на сервере).")
+        return call("sendMessage", chat_id=chat_id, text="Панель разработчика BeamLDrive.",
+                    reply_markup={"inline_keyboard": [[{"text": "Открыть панель", "web_app": {"url": PANEL_URL}}]]})
+
     if re.match(r"/app(\s|@|$)", text.strip()):
         if not APP_URL:
             return call("sendMessage", chat_id=chat_id, text="Адрес приложения не задан (APP_URL на сервере).")
@@ -1032,7 +1165,7 @@ def handle(msg):
                     reply_markup={"inline_keyboard": [[{"text": "Открыть BeamLDrive", "web_app": {"url": APP_URL}}]]})
 
     m = re.match(r"/link\s+(\d{6})\s*$", text.strip())
-    if m and chat_id != ADMIN:
+    if m:  # привязка работает и для разработчика: нужна для входа в панель через Telegram
         h = hashlib.sha256(m.group(1).encode()).hexdigest()
         rows = rest("GET", "account_codes", f"purpose=eq.tglink&code_hash=eq.{h}&select=*")
         if not rows or int(rows[0]["expires"]) < int(time.time()):
@@ -1097,6 +1230,7 @@ USER_COMMANDS = [
     {"command": "link", "description": "Привязать Telegram: /link КОД из лаунчера"},
     {"command": "request", "description": "Заявка на роль: /request логин moderator"},
     {"command": "app", "description": "Открыть приложение BeamLDrive (форум)"},
+    {"command": "panel", "description": "Панель разработчика (только вам)"},
     {"command": "id", "description": "Узнать свой chat id"},
 ]
 ADMIN_COMMANDS = USER_COMMANDS + [
@@ -1115,6 +1249,9 @@ def setup_commands():
     if APP_URL:  # кнопка «меню» слева от поля ввода открывает Mini App
         call("setChatMenuButton", menu_button={"type": "web_app", "text": "BeamLDrive",
                                                "web_app": {"url": APP_URL}})
+    if APP_URL and ADMIN:  # у разработчика кнопка открывает панель
+        call("setChatMenuButton", chat_id=ADMIN, menu_button={"type": "web_app", "text": "Панель",
+                                                             "web_app": {"url": PANEL_URL}})
     if ADMIN:
         call("setMyCommands", commands=ADMIN_COMMANDS, scope={"type": "chat", "chat_id": ADMIN})
 
