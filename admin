@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BeamLDrive · Панель</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { --bg:#141418; --card:#1e1e25; --card2:#26262f; --line:#2f2f3a; --fg:#f2f2f5; --dim:#8e8e9a;
+          --accent:#e0343d; --ok:#3ccf7a; --warn:#e5a23d; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--fg); font-family:"Segoe UI", system-ui, Roboto, sans-serif; font-size:14px; }
+  body { min-height:100vh; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 16px; }
+  h1 { font-size:20px; margin:0; color:var(--accent); }
+  .top { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+  .top .who { color:var(--dim); font-size:12px; margin-left:auto; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+  .tab { background:var(--card2); color:var(--dim); border:1px solid var(--line); border-radius:999px; padding:7px 14px; cursor:pointer; font:inherit; }
+  .tab.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  input, select, textarea { background:var(--card2); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:8px 10px; font:inherit; }
+  input[type=text], input[type=password], input[type=search] { min-width:180px; }
+  textarea { width:100%; min-height:60px; resize:vertical; }
+  .btn { background:var(--card2); color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:7px 12px; font:inherit; cursor:pointer; }
+  .btn.accent { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn.danger { color:#ff7b82; }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .btn.sm { padding:4px 9px; font-size:12px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  th { color:var(--dim); font-weight:600; font-size:12px; }
+  .tag { display:inline-block; font-size:11px; padding:2px 7px; border-radius:999px; background:var(--card2); color:var(--dim); }
+  .tag.ban { background:rgba(224,52,61,.18); color:#ff7b82; }
+  .tag.ok { background:rgba(60,207,122,.15); color:var(--ok); }
+  .muted { color:var(--dim); font-size:12px; }
+  .msg { font-size:13px; padding:8px 0; min-height:18px; }
+  .msg.err { color:#ff7b82; } .msg.ok { color:var(--ok); }
+  .bubble { border:1px solid var(--line); border-radius:12px; padding:8px 10px; margin-bottom:6px; background:var(--card2); }
+  .bubble.admin { border-color:var(--accent); }
+  .bubble .who { font-size:11px; color:var(--dim); margin-bottom:2px; }
+  .bubble .txt { white-space:pre-wrap; word-break:break-word; }
+  .post { border:1px solid var(--line); border-radius:12px; padding:9px 11px; margin-bottom:8px; background:var(--card2); }
+  .post.pinned { border-color:var(--accent); }
+  .post .head { display:flex; gap:8px; align-items:center; font-size:12px; color:var(--dim); margin-bottom:4px; flex-wrap:wrap; }
+  .post .head b { color:var(--accent); }
+  .post .txt { white-space:pre-wrap; word-break:break-word; }
+  .split { display:grid; grid-template-columns: 260px 1fr; gap:12px; }
+  .list .item { padding:9px 10px; border:1px solid var(--line); border-radius:10px; margin-bottom:6px; cursor:pointer; background:var(--card2); }
+  .list .item.on { border-color:var(--accent); }
+  .list .item .t { font-weight:600; }
+  .hidden { display:none !important; }
+  @media (max-width: 720px) { .split { grid-template-columns:1fr; } th.hide-s, td.hide-s { display:none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- вход -->
+  <div id="login" class="card" style="max-width:360px; margin:60px auto;">
+    <h1>BeamLDrive · панель</h1>
+    <p class="muted">Вход только для разработчика.</p>
+    <div class="row" style="flex-direction:column; align-items:stretch;">
+      <input type="text" id="lu" placeholder="Логин" autocomplete="username">
+      <input type="password" id="lp" placeholder="Пароль" autocomplete="current-password">
+      <button class="btn accent" id="lbtn">Войти</button>
+    </div>
+    <div class="msg err" id="lmsg"></div>
+  </div>
+
+  <!-- панель -->
+  <div id="app" class="hidden">
+    <div class="top">
+      <h1>BeamLDrive · панель</h1>
+      <span class="who" id="who"></span>
+      <button class="btn" id="logout">Выйти</button>
+    </div>
+    <div class="tabs">
+      <button class="tab on" data-tab="users">Игроки</button>
+      <button class="tab" data-tab="support">Поддержка</button>
+      <button class="tab" data-tab="forum">Форум</button>
+    </div>
+    <div class="msg" id="gmsg"></div>
+
+    <!-- игроки -->
+    <div id="tab-users" class="card">
+      <div class="row" style="margin-bottom:10px;">
+        <input type="search" id="usearch" placeholder="Поиск по логину…">
+        <button class="btn" id="urefresh">↻ Обновить</button>
+        <span class="muted" id="ucount"></span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>Логин</th><th>Роль</th><th class="hide-s">Зарегистрирован</th><th class="hide-s">Telegram</th><th>Статус</th><th>Действия</th></tr></thead>
+          <tbody id="ubody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- поддержка -->
+    <div id="tab-support" class="hidden">
+      <div class="split">
+        <div class="card list">
+          <div class="row" style="margin-bottom:8px;"><b>Открытые тикеты</b><button class="btn sm" id="sRefresh" style="margin-left:auto">↻</button></div>
+          <div id="tlist"></div>
+        </div>
+        <div class="card">
+          <div id="tnone" class="muted">Выберите тикет слева.</div>
+          <div id="tview" class="hidden">
+            <div class="row" style="margin-bottom:8px;">
+              <b id="tname"></b><span class="muted" id="tsubj"></span>
+            </div>
+            <div id="tmsgs" style="max-height:50vh; overflow-y:auto; margin-bottom:10px;"></div>
+            <textarea id="treply" placeholder="Ответ игроку (уйдёт как «Поддержка»)…" maxlength="2000"></textarea>
+            <div class="row" style="margin-top:8px;">
+              <button class="btn accent" id="tsend">Ответить</button>
+              <span class="muted">Бан игрока — во вкладке «Игроки».</span>
+            </div>
+            <div class="msg" id="tmsg"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- форум -->
+    <div id="tab-forum" class="hidden">
+      <div class="split">
+        <div class="card">
+          <div class="row" style="margin-bottom:8px;">
+            <b>Разделы</b>
+            <button class="btn sm accent" id="fAdd" style="margin-left:auto">＋ Сервер</button>
+          </div>
+          <div id="flist"></div>
+        </div>
+        <div class="card">
+          <div id="fnone" class="muted">Выберите раздел слева.</div>
+          <div id="fview" class="hidden">
+            <div class="row" style="margin-bottom:10px;">
+              <b id="fname" style="font-size:16px;"></b>
+              <span class="muted" id="fkey"></span>
+              <button class="btn sm" id="fRename" style="margin-left:auto">✎ Переименовать</button>
+              <button class="btn sm danger" id="fDel">Удалить раздел</button>
+            </div>
+            <div id="fposts"></div>
+            <div class="msg" id="fmsg"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var token = null, me = null, users = [], groups = [], curTicket = null, curSec = null, sections = [];
+  var ROLE_NAMES = { base: "Игрок", zero: "Зеро", moderator: "Модератор", smm: "Директор СММ", admin: "Разработчик" };
+  var ROLES = ["base", "zero", "moderator", "smm", "admin"];
+
+  function esc(s) { var d = document.createElement("div"); d.textContent = String(s == null ? "" : s); return d.innerHTML; }
+  function say(id, text, kind) { var el = $(id); el.textContent = text || ""; el.className = "msg " + (kind || ""); }
+  function date(ts) {
+    if (!ts) return "—";
+    var d = new Date(ts * 1000), p = function (n) { return (n < 10 ? "0" : "") + n; };
+    return p(d.getDate()) + "." + p(d.getMonth() + 1) + "." + d.getFullYear();
+  }
+  function api(path, body) {
+    var b = Object.assign({ token: token }, body || {});
+    return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          if (!r.ok) { var e = new Error(d.error || ("Ошибка " + r.status)); e.data = d; throw e; }
+          return d;
+        });
+      });
+  }
+  function get(path) { return fetch(path).then(function (r) { return r.json(); }); }
+
+  /* ── хранение входа (только удобство: токен в браузере) ── */
+  function saveToken(t) { try { if (t) localStorage.setItem("bld_admin_token", t); else localStorage.removeItem("bld_admin_token"); } catch (e) {} }
+  function loadToken() { try { return localStorage.getItem("bld_admin_token"); } catch (e) { return null; } }
+
+  function showLogin(msg) {
+    $("login").classList.remove("hidden"); $("app").classList.add("hidden");
+    say("lmsg", msg || "", "err");
+  }
+  function showApp() {
+    $("login").classList.add("hidden"); $("app").classList.remove("hidden");
+    $("who").textContent = "Вы: " + (me.username || "");
+    loadUsers(); loadTickets(); loadForum();
+  }
+
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+
+  function checkAdmin() {
+    return api("/api/me").then(function (d) {
+      if (d.role !== "admin") { throw new Error("Панель только для разработчика"); }
+      me = d; showApp();
+    });
+  }
+  function start() {
+    // открыта из Telegram-бота: вход по подписи Telegram, пароль не нужен
+    if (tg && tg.initData) {
+      return fetch("/api/tg/auth", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: tg.initData }) })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok) throw new Error(res.d.error || "Ошибка входа");
+          token = res.d.token; saveToken(token);
+          return checkAdmin();
+        })
+        .catch(function (e) { token = null; saveToken(null); showLogin(e.message); });
+    }
+    token = loadToken();
+    if (!token) return showLogin();
+    checkAdmin().catch(function (e) { token = null; saveToken(null); showLogin(e.message); });
+  }
+
+  $("lbtn").onclick = function () {
+    var u = $("lu").value.trim(), p = $("lp").value;
+    if (!u || !p) return say("lmsg", "Введите логин и пароль", "err");
+    fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: u, password: p }) })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        if (!res.ok) throw new Error(res.d.error || "Ошибка входа");
+        token = res.d.token; saveToken(token);
+        return api("/api/me");
+      })
+      .then(function (d) {
+        if (d.role !== "admin") { token = null; saveToken(null); throw new Error("Панель только для разработчика"); }
+        me = d; $("lp").value = ""; showApp();
+      })
+      .catch(function (e) { say("lmsg", e.message, "err"); });
+  };
+  $("lp").onkeydown = function (e) { if (e.key === "Enter") $("lbtn").click(); };
+  $("logout").onclick = function () { token = null; saveToken(null); location.reload(); };
+
+  /* ── вкладки ── */
+  document.querySelectorAll(".tab").forEach(function (b) {
+    b.onclick = function () {
+      document.querySelectorAll(".tab").forEach(function (x) { x.classList.toggle("on", x === b); });
+      ["users", "support", "forum"].forEach(function (t) { $("tab-" + t).classList.toggle("hidden", b.dataset.tab !== t); });
+    };
+  });
+
+  /* ── игроки ── */
+  function loadUsers() {
+    return api("/api/admin/users").then(function (d) { users = d.users || []; renderUsers(); })
+      .catch(function (e) { say("gmsg", "Игроки: " + e.message, "err"); });
+  }
+  function renderUsers() {
+    var q = $("usearch").value.trim().toLowerCase();
+    var rows = users.filter(function (u) { return !q || u.username.toLowerCase().indexOf(q) >= 0; });
+    $("ucount").textContent = "Всего: " + users.length + (q ? " · найдено: " + rows.length : "");
+    var body = $("ubody"); body.innerHTML = "";
+    rows.forEach(function (u) {
+      var tr = document.createElement("tr");
+      var roleSel = "<select data-role=\"" + esc(u.username) + "\">" + ROLES.map(function (r) {
+        return "<option value=\"" + r + "\"" + (r === u.role ? " selected" : "") + ">" + ROLE_NAMES[r] + "</option>";
+      }).join("") + "</select>";
+      var now = Math.floor(Date.now() / 1000);
+      var status = u.banned_until > now
+        ? "<span class=\"tag ban\">" + (u.banned_until > 9000000000 ? "бан навсегда" : "бан до " + date(u.banned_until)) + "</span>"
+        : "<span class=\"tag ok\">активен</span>";
+      tr.innerHTML = "<td><b>" + esc(u.username) + "</b>" + (u.email ? "<div class=\"muted\">" + esc(u.email) + "</div>" : "") + "</td>"
+        + "<td>" + roleSel + "</td>"
+        + "<td class=\"hide-s\">" + date(u.created) + "</td>"
+        + "<td class=\"hide-s\">" + (u.tg ? "<span class=\"tag ok\">да</span>" : "<span class=\"muted\">нет</span>") + "</td>"
+        + "<td>" + status + (u.ban_reason ? "<div class=\"muted\">" + esc(u.ban_reason) + "</div>" : "") + "</td>"
+        + "<td><div class=\"row\">"
+        + "<button class=\"btn sm danger\" data-ban=\"" + esc(u.username) + "\">Бан</button>"
+        + (u.banned_until > now ? "<button class=\"btn sm\" data-unban=\"" + esc(u.username) + "\">Разбан</button>" : "")
+        + "</div></td>";
+      body.appendChild(tr);
+    });
+    body.querySelectorAll("select[data-role]").forEach(function (sel) {
+      sel.onchange = function () {
+        var name = sel.dataset.role, role = sel.value;
+        if (!confirm("Сменить роль «" + name + "» на «" + ROLE_NAMES[role] + "»?")) { loadUsers(); return; }
+        api("/api/admin/role", { username: name, role: role })
+          .then(function () { say("gmsg", "Роль «" + name + "»: " + ROLE_NAMES[role], "ok"); loadUsers(); })
+          .catch(function (e) { say("gmsg", e.message, "err"); loadUsers(); });
+      };
+    });
+    body.querySelectorAll("button[data-ban]").forEach(function (b) {
+      b.onclick = function () { ban(b.dataset.ban); };
+    });
+    body.querySelectorAll("button[data-unban]").forEach(function (b) {
+      b.onclick = function () { setBan(b.dataset.unban, 0, ""); };
+    });
+  }
+  function ban(name) {
+    var m = prompt("Срок бана для «" + name + "»:\n10 — 10 минут\n60 — 1 час\n1440 — 1 день\n10080 — 7 дней\n-1 — навсегда\n(0 — снять бан)", "1440");
+    if (m === null) return;
+    var mins = parseInt(m, 10);
+    if (isNaN(mins)) return say("gmsg", "Введите число минут", "err");
+    var reason = mins === 0 ? "" : (prompt("Причина (увидит игрок):", "") || "");
+    setBan(name, mins, reason);
+  }
+  function setBan(name, mins, reason) {
+    api("/api/staff/ban", { username: name, minutes: mins, reason: reason })
+      .then(function () { say("gmsg", mins === 0 ? "Бан снят: " + name : "Бан выдан: " + name, "ok"); loadUsers(); })
+      .catch(function (e) { say("gmsg", e.message, "err"); });
+  }
+  $("usearch").oninput = renderUsers;
+  $("urefresh").onclick = loadUsers;
+
+  /* ── поддержка ── */
+  function loadTickets() {
+    return api("/api/staff/tickets").then(function (d) {
+      var box = $("tlist"); box.innerHTML = "";
+      if (!d.tickets || !d.tickets.length) { box.innerHTML = "<div class=\"muted\">Открытых тикетов нет.</div>"; return; }
+      d.tickets.forEach(function (t) {
+        var el = document.createElement("div");
+        el.className = "item" + (curTicket === t.id ? " on" : "");
+        el.innerHTML = "<div class=\"t\">" + esc(t.username) + (t.banned ? " <span class=\"tag ban\">бан</span>" : "") + "</div>"
+          + "<div class=\"muted\">" + esc(t.subject || "Без темы") + "</div>";
+        el.onclick = function () { openTicket(t.id, t.username, t.subject); };
+        box.appendChild(el);
+      });
+    }).catch(function (e) { say("gmsg", "Поддержка: " + e.message, "err"); });
+  }
+  function openTicket(id, name, subj) {
+    curTicket = id;
+    $("tnone").classList.add("hidden"); $("tview").classList.remove("hidden");
+    $("tname").textContent = name; $("tsubj").textContent = "  " + (subj || "");
+    say("tmsg", "");
+    loadMessages();
+    loadTickets();
+  }
+  function loadMessages() {
+    if (!curTicket) return;
+    api("/api/staff/messages", { ticket_id: curTicket }).then(function (d) {
+      var box = $("tmsgs"); box.innerHTML = "";
+      (d.messages || []).forEach(function (m) {
+        var el = document.createElement("div");
+        el.className = "bubble" + (m.sender === "admin" ? " admin" : "");
+        el.innerHTML = "<div class=\"who\">" + (m.sender === "admin" ? "Поддержка" : esc(d.username)) + " · " + date(m.created) + "</div>"
+          + "<div class=\"txt\">" + esc(m.text) + "</div>";
+        box.appendChild(el);
+      });
+      box.scrollTop = box.scrollHeight;
+    }).catch(function (e) { say("tmsg", e.message, "err"); });
+  }
+  $("tsend").onclick = function () {
+    var t = $("treply").value.trim();
+    if (!t || !curTicket) return;
+    api("/api/staff/reply", { ticket_id: curTicket, text: t }).then(function () {
+      $("treply").value = ""; say("tmsg", "Отправлено", "ok"); loadMessages(); loadTickets();
+    }).catch(function (e) { say("tmsg", e.message, "err"); });
+  };
+  $("sRefresh").onclick = loadTickets;
+
+  /* ── форум ── */
+  function loadForum() {
+    return get("/api/forum/stats").then(function (d) {
+      groups = d.groups || []; sections = [];
+      groups.forEach(function (g) { g.sections.forEach(function (s) { s.group = g.title; sections.push(s); }); });
+      renderSections();
+    }).catch(function (e) { say("gmsg", "Форум: " + e.message, "err"); });
+  }
+  function renderSections() {
+    var box = $("flist"); box.innerHTML = "";
+    groups.forEach(function (g) {
+      var h = document.createElement("div"); h.className = "muted"; h.style.margin = "8px 0 4px";
+      h.textContent = g.title; box.appendChild(h);
+      g.sections.forEach(function (s) {
+        var el = document.createElement("div");
+        el.className = "item" + (curSec === s.key ? " on" : "");
+        el.innerHTML = "<div class=\"t\">" + esc(s.title) + "</div><div class=\"muted\">" + s.posts + " сообщ. · доступ: " + esc(s.access) + "</div>";
+        el.onclick = function () { openSection(s.key); };
+        box.appendChild(el);
+      });
+    });
+  }
+  function openSection(key) {
+    curSec = key;
+    var s = sections.filter(function (x) { return x.key === key; })[0];
+    if (!s) return;
+    $("fnone").classList.add("hidden"); $("fview").classList.remove("hidden");
+    $("fname").textContent = s.title; $("fkey").textContent = s.group + " · " + key;
+    renderSections();
+    loadPosts();
+  }
+  function loadPosts() {
+    if (!curSec) return;
+    get("/api/forum?section=" + encodeURIComponent(curSec)).then(function (d) {
+      var box = $("fposts"); box.innerHTML = "";
+      var rows = d.posts || [];
+      if (!rows.length) box.innerHTML = "<div class=\"muted\">В разделе нет сообщений.</div>";
+      rows.forEach(function (p) {
+        var el = document.createElement("div");
+        el.className = "post" + (p.pinned ? " pinned" : "");
+        el.innerHTML = "<div class=\"head\"><b>" + esc(p.username) + "</b><span>" + date(p.created) + "</span>"
+          + (p.pinned ? "<span class=\"tag ok\">закреплено</span>" : "") + "</div>"
+          + "<div class=\"txt\">" + esc(p.text) + "</div>"
+          + "<div class=\"row\" style=\"margin-top:6px;\">"
+          + "<button class=\"btn sm\" data-pin=\"" + p.id + "\" data-on=\"" + (p.pinned ? 0 : 1) + "\">" + (p.pinned ? "Открепить" : "Закрепить") + "</button>"
+          + "<button class=\"btn sm danger\" data-del=\"" + p.id + "\">Удалить</button></div>";
+        box.appendChild(el);
+      });
+      box.querySelectorAll("button[data-pin]").forEach(function (b) {
+        b.onclick = function () {
+          api("/api/forum/pin", { id: +b.dataset.pin, pinned: b.dataset.on === "1" })
+            .then(function () { say("fmsg", "Готово", "ok"); loadPosts(); })
+            .catch(function (e) { say("fmsg", e.message, "err"); });
+        };
+      });
+      box.querySelectorAll("button[data-del]").forEach(function (b) {
+        b.onclick = function () {
+          if (!confirm("Удалить сообщение навсегда?")) return;
+          api("/api/admin/forum/delete", { id: +b.dataset.del })
+            .then(function () { say("fmsg", "Сообщение удалено", "ok"); loadPosts(); loadForum(); })
+            .catch(function (e) { say("fmsg", e.message, "err"); });
+        };
+      });
+    }).catch(function (e) { say("fmsg", e.message, "err"); });
+  }
+  $("fAdd").onclick = function () {
+    var t = prompt("Название нового сервера:");
+    if (!t || t.trim().length < 3) return;
+    api("/api/forum/section/create", { title: t.trim() })
+      .then(function () { say("fmsg", "Сервер создан", "ok"); loadForum(); })
+      .catch(function (e) { say("gmsg", e.message, "err"); });
+  };
+  $("fRename").onclick = function () {
+    if (!curSec) return;
+    var s = sections.filter(function (x) { return x.key === curSec; })[0];
+    var t = prompt("Новое название:", s ? s.title : "");
+    if (!t || t.trim().length < 3) return;
+    api("/api/forum/section/rename", { key: curSec, title: t.trim() })
+      .then(function () { say("fmsg", "Переименовано", "ok"); return loadForum(); })
+      .then(function () { openSection(curSec); })
+      .catch(function (e) { say("fmsg", e.message, "err"); });
+  };
+  $("fDel").onclick = function () {
+    if (!curSec) return;
+    if (!confirm("Удалить раздел и ВСЕ его сообщения? Это нельзя отменить.")) return;
+    api("/api/admin/forum/section/delete", { key: curSec })
+      .then(function () {
+        curSec = null; $("fview").classList.add("hidden"); $("fnone").classList.remove("hidden");
+        say("gmsg", "Раздел удалён", "ok"); loadForum();
+      })
+      .catch(function (e) { say("fmsg", e.message, "err"); });
+  };
+
+  start();
+})();
+</script>
+</body>
+</html>
