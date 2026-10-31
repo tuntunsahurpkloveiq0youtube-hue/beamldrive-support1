@@ -143,6 +143,13 @@
               <button class="btn sm danger" id="fDel">Удалить раздел</button>
             </div>
             <div id="fposts"></div>
+            <div class="row" style="margin-top:10px;">
+              <textarea id="fText" placeholder="Сообщение от разработчика в этот раздел…" maxlength="1000"></textarea>
+            </div>
+            <div class="row" style="margin-top:6px;">
+              <button class="btn accent" id="fSend">Отправить</button>
+              <span class="muted">Писать в форум может только разработчик.</span>
+            </div>
             <div class="msg" id="fmsg"></div>
           </div>
         </div>
@@ -356,6 +363,13 @@
   $("sRefresh").onclick = loadTickets;
 
   /* ── форум ── */
+  $("fSend").onclick = function () {
+    var t = $("fText").value.trim();
+    if (!t || !curSec) return;
+    api("/api/forum/post", { text: t, section: curSec }).then(function () {
+      $("fText").value = ""; say("fmsg", "Отправлено", "ok"); loadPosts();
+    }).catch(function (e) { say("fmsg", e.message, "err"); });
+  };
   function loadForum() {
     return get("/api/forum/stats").then(function (d) {
       groups = d.groups || []; sections = [];
