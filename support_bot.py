@@ -1,3 +1,4 @@
+
 """
 BeamLDrive — сервер поддержки: Telegram-бот + API для лаунчера.
 Данные хранятся в Supabase (PostgreSQL).
@@ -37,6 +38,7 @@ _base = APP_URL.rstrip("/")
 if _base.endswith("/app"):
     _base = _base[:-4]
 PANEL_URL = (_base + "/panel") if APP_URL else ""  # панель разработчика как Mini App
+STAFF_URL = (_base + "/staff") if APP_URL else ""  # панель модераторов и СММ как Mini App
 TILDA_KEY = os.environ.get("TILDA_KEY") or CFG.get("tilda_key", "")  # секрет для вебхука сайта
 OFFLINE = bool(os.environ.get("SUPPORT_OFFLINE"))  # только для тестов
 API = f"https://api.telegram.org/bot{TOKEN}/"
@@ -370,11 +372,7 @@ def forum_info(key):
 
 
 def can_post_section(user, sec):
-    acc = sec.get("access") or "all"
-    if acc == "all":
-        return True
-    if acc == "staff":
-        return can_moderate(user)
+    # писать в форум может только разработчик; модераторы удаляют сообщения отдельным маршрутом
     return user.get("role") == "admin"
 
 
@@ -1150,6 +1148,14 @@ def handle(msg):
     text = msg.get("text", "")
     user = msg.get("from", {})
 
+    if re.match(r"/staff(\s|@|$)", text.strip()):
+        # персонал: модераторы и СММ, привязанные через /link
+        me_rows = rest("GET", "users", f"tg_chat=eq.{int(chat_id)}&select=*")
+        if not me_rows or not can_moderate(me_rows[0]):
+            return call("sendMessage", chat_id=chat_id, text="Панель персонала доступна модераторам и директору СММ после привязки Telegram (/link КОД).")
+        return call("sendMessage", chat_id=chat_id, text="Панель персонала BeamLDrive.",
+                    reply_markup={"inline_keyboard": [[{"text": "Открыть панель персонала", "web_app": {"url": STAFF_URL}}]]})
+
     if re.match(r"/panel(\s|@|$)", text.strip()):
         if chat_id != ADMIN:
             return call("sendMessage", chat_id=chat_id, text="Панель доступна только разработчику.")
@@ -1231,6 +1237,7 @@ USER_COMMANDS = [
     {"command": "request", "description": "Заявка на роль: /request логин moderator"},
     {"command": "app", "description": "Открыть приложение BeamLDrive (форум)"},
     {"command": "panel", "description": "Панель разработчика (только вам)"},
+    {"command": "staff", "description": "Панель персонала (модераторам и СММ)"},
     {"command": "id", "description": "Узнать свой chat id"},
 ]
 ADMIN_COMMANDS = USER_COMMANDS + [
