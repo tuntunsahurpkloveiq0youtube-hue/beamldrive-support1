@@ -40,7 +40,7 @@ ROLES = ("base", "zero", "moderator", "smm", "admin")
 # Роли = готовые наборы прав. Права можно добавлять/убирать командами бота.
 PRESETS = {
     "base": "vg,mp",
-    "zero": "vg,mp,bng",
+    "zero": "vg,mp,bng,server",
     "moderator": "vg,mp,mod",              # модератор: отвечает игрокам, банит на время
     "smm": "vg,mp,bng,tg,mod",             # директор СММ: как модератор + каталоги и канал
     "admin": "vg,mp,bng,server,tg,mod",    # разработчик: всё
@@ -345,6 +345,27 @@ def api_news_public():
     return {"news": out}
 
 
+def api_forum_public():
+    rows = rest("GET", "forum_posts", "order=id.desc&limit=50&select=id,username,text,created")
+    return {"posts": rows}
+
+
+def api_forum_post(user, d):
+    text = str(d.get("text", "")).strip()[:1000]
+    if len(text) < 2:
+        return 400, {"error": "Напишите сообщение"}
+    if is_profane(text):
+        return 400, {"error": "В сообщении есть нецензурные слова. Уберите их и отправьте снова."}
+    if not rate_ok("forum:%d" % user["id"], 10, 600):
+        return 429, {"error": "Слишком часто, подождите немного"}
+    with _db_lock:
+        rest("POST", "forum_posts", body={"username": user["username"], "text": text,
+                                          "created": int(time.time())}, prefer="return=minimal")
+    if ADMIN:
+        call("sendMessage", chat_id=ADMIN, text=f"💬 Форум · {user['username']}\n{text}")
+    return 200, {"ok": True}
+
+
 def api_list(user, d):
     rows = rest("GET", "tickets", f"user_id=eq.{int(user['id'])}&order=updated.desc&limit=100"
                                   f"&select=id,subject,status,updated")
@@ -489,6 +510,7 @@ ROUTES_AUTH = {
     "/api/tickets/create": api_create, "/api/tickets/send": api_send,
     "/api/staff/tickets": api_staff_tickets, "/api/staff/messages": api_staff_messages,
     "/api/staff/reply": api_staff_reply, "/api/staff/ban": api_staff_ban,
+    "/api/forum/post": api_forum_post,
 }
 
 
@@ -509,6 +531,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/ping":
             return self._reply(200, {"ok": True})
+        if self.path.split("?")[0] == "/api/forum":
+            try:
+                return self._reply(200, api_forum_public())
+            except Exception as e:
+                print("forum error:", e, flush=True)
+                return self._reply(500, {"error": "Ошибка сервера"})
         if self.path.split("?")[0] == "/api/news":
             try:
                 return self._reply(200, api_news_public())
@@ -579,7 +607,8 @@ HELP = ("Команды:\n"
         "/ban имя 10m причина — бан (m — минуты, h — часы, d — дни, perm — навсегда)\n"
         "/unban имя — снять бан\n"
         "/news текст — опубликовать новость в лаунчере (ссылка в тексте станет кнопкой)\n"
-        "/newsdel 5 — удалить новость №5")
+        "/newsdel 5 — удалить новость №5\n"
+        "/forumdel 7 — удалить сообщение форума №7")
 
 
 def parse_minutes(s):
@@ -661,6 +690,11 @@ def handle_admin(msg, chat_id, text):
         if m:
             touch_ticket(int(m.group(1)), status="closed")
             return call("sendMessage", chat_id=ADMIN, text=f"Тикет #{m.group(1)} закрыт")
+    m = re.match(r"/forumdel\s+#?(\d+)\s*$", text.strip())
+    if m:
+        with _db_lock:
+            rest("DELETE", "forum_posts", f"id=eq.{int(m.group(1))}", prefer="return=minimal")
+        return call("sendMessage", chat_id=ADMIN, text=f"Сообщение форума #{m.group(1)} удалено")
     m = re.match(r"/news\s+(.+)", text, re.S)
     if m:
         body = m.group(1).strip()[:2000]
