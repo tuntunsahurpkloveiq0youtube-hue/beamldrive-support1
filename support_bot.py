@@ -355,13 +355,63 @@ def api_news_public():
     return {"news": out}
 
 
-def api_forum_public():
-    rows = rest("GET", "forum_posts", "order=id.desc&limit=50&select=id,username,text,created")
+def forum_rows():
+    return rest("GET", "forum_sections", "order=pos.asc&select=key,grp,title,descr,access,pos")
+
+
+def forum_info(key):
+    rows = rest("GET", "forum_sections", f"key=eq.{q(key)}&select=key,grp,title,descr,access,pos")
+    return rows[0] if rows else None
+
+
+def can_post_section(user, sec):
+    acc = sec.get("access") or "all"
+    if acc == "all":
+        return True
+    if acc == "staff":
+        return can_moderate(user)
+    return user.get("role") == "admin"
+
+
+def api_forum_public(query=""):
+    sec = urllib.parse.parse_qs(query).get("section", [""])[0]
+    flt = f"&section=eq.{q(sec)}" if sec else ""
+    rows = rest("GET", "forum_posts",
+                f"order=pinned.desc,id.desc&limit=50{flt}&select=id,username,text,created,section,pinned")
     return {"posts": rows}
+
+
+def api_forum_stats():
+    rows = rest("GET", "forum_posts", "order=id.desc&limit=5000&select=section,username,text,created")
+    stat = {}
+    for r in rows:
+        st = stat.setdefault(r.get("section") or "general", {"posts": 0, "users": set(), "last": None})
+        st["posts"] += 1
+        st["users"].add(r["username"])
+        if st["last"] is None:  # строки уже от новых к старым
+            st["last"] = {"username": r["username"], "text": r["text"][:60], "created": r["created"]}
+    groups = []
+    by_title = {}
+    for sec in forum_rows():
+        st = stat.get(sec["key"], {"posts": 0, "users": set(), "last": None})
+        if sec["grp"] not in by_title:
+            by_title[sec["grp"]] = {"title": sec["grp"], "sections": []}
+            groups.append(by_title[sec["grp"]])
+        by_title[sec["grp"]]["sections"].append({
+            "key": sec["key"], "title": sec["title"], "desc": sec.get("descr") or "",
+            "access": sec.get("access") or "all",
+            "posts": st["posts"], "users": len(st["users"]), "last": st["last"]})
+    return {"groups": groups}
 
 
 def api_forum_post(user, d):
     text = str(d.get("text", "")).strip()[:1000]
+    section = str(d.get("section", "general"))
+    sec = forum_info(section)
+    if not sec:
+        return 400, {"error": "Такого раздела нет"}
+    if not can_post_section(user, sec):
+        return 403, {"error": "В этот раздел писать нельзя"}
     if len(text) < 2:
         return 400, {"error": "Напишите сообщение"}
     if is_profane(text):
@@ -369,10 +419,11 @@ def api_forum_post(user, d):
     if not rate_ok("forum:%d" % user["id"], 10, 600):
         return 429, {"error": "Слишком часто, подождите немного"}
     with _db_lock:
-        rest("POST", "forum_posts", body={"username": user["username"], "text": text,
+        rest("POST", "forum_posts", body={"username": user["username"], "text": text, "section": section,
                                           "created": int(time.time())}, prefer="return=minimal")
     if ADMIN:
-        call("sendMessage", chat_id=ADMIN, text=f"💬 Форум · {user['username']}\n{text}")
+        call("sendMessage", chat_id=ADMIN,
+             text=f"💬 Форум · {sec['title']}\n{user['username']}: {text}")
     return 200, {"ok": True}
 
 
@@ -478,6 +529,47 @@ def api_code_confirm(user, d):
                  prefer="return=minimal")
     with _db_lock:
         rest("DELETE", "account_codes", f"user_id=eq.{int(user['id'])}&purpose=eq.{q(purpose)}",
+             prefer="return=minimal")
+    return 200, {"ok": True}
+
+
+def api_forum_pin(user, d):
+    if user.get("role") != "admin":
+        return 403, {"error": "Закреплять может только разработчик"}
+    try:
+        pid = int(d.get("id"))
+    except (TypeError, ValueError):
+        return 400, {"error": "Нет сообщения"}
+    with _db_lock:
+        rest("PATCH", "forum_posts", f"id=eq.{pid}", body={"pinned": 1 if d.get("pinned") else 0},
+             prefer="return=minimal")
+    return 200, {"ok": True}
+
+
+def api_forum_section_create(user, d):
+    if user.get("role") != "admin":
+        return 403, {"error": "Создавать серверы может только разработчик"}
+    title = str(d.get("title", "")).strip()[:60]
+    if len(title) < 3:
+        return 400, {"error": "Название: от 3 символов"}
+    key = "srv" + secrets.token_hex(3)
+    with _db_lock:
+        rest("POST", "forum_sections", body={"key": key, "grp": "Игровые серверы", "title": title,
+                                             "descr": "Обсуждение сервера", "access": "admin", "pos": 9},
+             prefer="return=minimal")
+    return 200, {"key": key}
+
+
+def api_forum_section_rename(user, d):
+    if user.get("role") != "admin":
+        return 403, {"error": "Переименовывать может только разработчик"}
+    title = str(d.get("title", "")).strip()[:60]
+    if len(title) < 3:
+        return 400, {"error": "Название: от 3 символов"}
+    if not forum_info(str(d.get("key", ""))):
+        return 404, {"error": "Раздел не найден"}
+    with _db_lock:
+        rest("PATCH", "forum_sections", f"key=eq.{q(str(d.get('key', '')))}", body={"title": title},
              prefer="return=minimal")
     return 200, {"ok": True}
 
@@ -627,6 +719,8 @@ ROUTES_AUTH = {
     "/api/staff/tickets": api_staff_tickets, "/api/staff/messages": api_staff_messages,
     "/api/staff/reply": api_staff_reply, "/api/staff/ban": api_staff_ban,
     "/api/forum/post": api_forum_post,
+    "/api/forum/pin": api_forum_pin, "/api/forum/section/create": api_forum_section_create,
+    "/api/forum/section/rename": api_forum_section_rename,
     "/api/account/tglink": api_tg_link, "/api/account/code": api_code_request,
     "/api/account/confirm": api_code_confirm,
 }
@@ -649,9 +743,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/ping":
             return self._reply(200, {"ok": True})
-        if self.path.split("?")[0] == "/api/forum":
+        path, _, query = self.path.partition("?")
+        if path == "/api/forum/stats":
             try:
-                return self._reply(200, api_forum_public())
+                return self._reply(200, api_forum_stats())
+            except Exception as e:
+                print("forum stats error:", e, flush=True)
+                return self._reply(500, {"error": "Ошибка сервера"})
+        if path == "/api/forum":
+            try:
+                return self._reply(200, api_forum_public(query))
             except Exception as e:
                 print("forum error:", e, flush=True)
                 return self._reply(500, {"error": "Ошибка сервера"})
@@ -935,6 +1036,29 @@ def handle(msg):
     call("sendMessage", chat_id=chat_id, text="Принято ✅ Мы ответим здесь.")
 
 
+USER_COMMANDS = [
+    {"command": "start", "description": "Начать / справка о поддержке"},
+    {"command": "link", "description": "Привязать Telegram: /link КОД из лаунчера"},
+    {"command": "request", "description": "Заявка на роль: /request логин moderator"},
+    {"command": "id", "description": "Узнать свой chat id"},
+]
+ADMIN_COMMANDS = USER_COMMANDS + [
+    {"command": "requests", "description": "Новые заявки на роль"},
+    {"command": "tickets", "description": "Открытые тикеты"},
+    {"command": "users", "description": "Аккаунты, роли и права"},
+    {"command": "news", "description": "Опубликовать новость: /news текст"},
+    {"command": "ban", "description": "Бан: /ban имя 10m причина"},
+    {"command": "help", "description": "Все команды админа"},
+]
+
+
+def setup_commands():
+    """Меню команд в Telegram: пользователям — свои, админу — полный список."""
+    call("setMyCommands", commands=USER_COMMANDS, scope={"type": "all_private_chats"})
+    if ADMIN:
+        call("setMyCommands", commands=ADMIN_COMMANDS, scope={"type": "chat", "chat_id": ADMIN})
+
+
 def main():
     if not OFFLINE:
         try:
@@ -950,6 +1074,7 @@ def main():
     if not me.get("ok"):
         die(f"Ошибка токена или нет связи с Telegram: {me.get('description')}")
     print(f"Бот @{me['result']['username']} запущен. Админ: {ADMIN or 'не задан (напишите боту /id)'}", flush=True)
+    setup_commands()
     offset = 0
     while True:
         res = call("getUpdates", offset=offset, timeout=50, allowed_updates=["message"])
