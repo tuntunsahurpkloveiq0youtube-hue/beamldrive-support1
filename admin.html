@@ -139,6 +139,11 @@
             <div class="row" style="margin-bottom:10px;">
               <b id="fname" style="font-size:16px;"></b>
               <span class="muted" id="fkey"></span>
+              <select id="fAccess" title="Кто может писать в раздел">
+                <option value="admin">Пишет только разработчик</option>
+                <option value="staff">Пишут модераторы и разработчик</option>
+                <option value="all">Пишут все игроки</option>
+              </select>
               <button class="btn sm" id="fRename" style="margin-left:auto">✎ Переименовать</button>
               <button class="btn sm danger" id="fDel">Удалить раздел</button>
             </div>
@@ -148,7 +153,7 @@
             </div>
             <div class="row" style="margin-top:6px;">
               <button class="btn accent" id="fSend">Отправить</button>
-              <span class="muted">Писать в форум может только разработчик.</span>
+              <span class="muted">Вы пишете от имени разработчика. Кто ещё пишет в раздел, выбирается вверху.</span>
             </div>
             <div class="msg" id="fmsg"></div>
           </div>
@@ -363,6 +368,14 @@
   $("sRefresh").onclick = loadTickets;
 
   /* ── форум ── */
+  $("fAccess").onchange = function () {
+    if (!curSec) return;
+    var v = $("fAccess").value;
+    api("/api/admin/forum/section/access", { key: curSec, access: v }).then(function () {
+      say("fmsg", "Права раздела сохранены", "ok"); return loadForum();
+    }).then(function () { openSection(curSec); })
+      .catch(function (e) { say("fmsg", e.message, "err"); });
+  };
   $("fSend").onclick = function () {
     var t = $("fText").value.trim();
     if (!t || !curSec) return;
@@ -397,6 +410,7 @@
     if (!s) return;
     $("fnone").classList.add("hidden"); $("fview").classList.remove("hidden");
     $("fname").textContent = s.title; $("fkey").textContent = s.group + " · " + key;
+    $("fAccess").value = s.access || "admin";
     renderSections();
     loadPosts();
   }
